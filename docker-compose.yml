@@ -1,0 +1,9 @@
+services:
+  intervals-calendar:
+    build: .
+    container_name: intervals-calendar
+    restart: unless-stopped
+    ports:
+      - "8491:8491"
+    env_file:
+      - .env
