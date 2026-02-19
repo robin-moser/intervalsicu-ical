@@ -3,11 +3,10 @@ package main
 import (
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
+	"strings"
 	"time"
 )
 
@@ -19,24 +18,22 @@ type Config struct {
 	Timezone             string
 	PastDays             int
 	FutureDays           int
-	ActiveRefreshMinutes int
-	QuietRefreshMinutes  int
-	ActiveStartHour      int
-	ActiveEndHour        int
+	ExcludedKeywords     []string
+	IncludeAllDayEvents  bool
+	IncludeFutureRaces   bool
 }
 
 func loadConfig() Config {
 	return Config{
-		APIKey:               mustEnv("INTERVALS_API_KEY"),
-		AthleteID:            mustEnv("INTERVALS_ATHLETE_ID"),
-		Port:                 envOrDefault("PORT", "8491"),
-		Timezone:             envOrDefault("TZ", "America/Denver"),
-		PastDays:             envIntOrDefault("PAST_DAYS", 90),
-		FutureDays:           envIntOrDefault("FUTURE_DAYS", 60),
-		ActiveRefreshMinutes: envIntOrDefault("ACTIVE_REFRESH_MINUTES", 10),
-		QuietRefreshMinutes:  envIntOrDefault("QUIET_REFRESH_MINUTES", 30),
-		ActiveStartHour:      envIntOrDefault("ACTIVE_START_HOUR", 6),
-		ActiveEndHour:        envIntOrDefault("ACTIVE_END_HOUR", 22),
+		APIKey:              mustEnv("INTERVALS_API_KEY"),
+		AthleteID:           mustEnv("INTERVALS_ATHLETE_ID"),
+		Port:                envOrDefault("PORT", "8491"),
+		Timezone:            envOrDefault("TZ", "America/Denver"),
+		PastDays:            envIntOrDefault("PAST_DAYS", 90),
+		FutureDays:          envIntOrDefault("FUTURE_DAYS", 60),
+		ExcludedKeywords:    envKeywords("EXCLUDED_KEYWORDS"),
+		IncludeAllDayEvents: envBoolOrDefault("INCLUDE_ALL_DAY_EVENTS", true),
+		IncludeFutureRaces:  envBoolOrDefault("INCLUDE_FUTURE_RACES", true),
 	}
 }
 
@@ -64,28 +61,99 @@ func envIntOrDefault(key string, def int) int {
 	return def
 }
 
-// CalendarCache holds the generated ICS data.
-type CalendarCache struct {
-	mu   sync.RWMutex
-	data []byte
+func envBoolOrDefault(key string, def bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	switch v {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no":
+		return false
+	}
+	return def
 }
 
-func (c *CalendarCache) Get() []byte {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.data
+// envKeywords parses a comma-separated list of keywords from an env var.
+// Returns nil (no filtering) if the var is unset or blank.
+func envKeywords(key string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, kw := range strings.Split(v, ",") {
+		kw = strings.TrimSpace(kw)
+		if kw != "" {
+			out = append(out, strings.ToLower(kw))
+		}
+	}
+	return out
 }
 
-func (c *CalendarCache) Set(data []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.data = data
+func main() {
+	cfg := loadConfig()
+	client := NewIntervalsClient(cfg.APIKey, cfg.AthleteID)
+
+	// Route pattern: /<athlete-id>/<calendar-type>.ics
+	baseRoute := "/" + cfg.AthleteID
+
+	// Metrics calendar (wellness data only)
+	http.HandleFunc(baseRoute+"/metrics.ics", func(w http.ResponseWriter, r *http.Request) {
+		handleMetricsCalendar(w, r, client, cfg)
+	})
+
+	// Workouts calendar (completed activities + planned workouts, no races)
+	http.HandleFunc(baseRoute+"/workouts.ics", func(w http.ResponseWriter, r *http.Request) {
+		handleWorkoutsCalendar(w, r, client, cfg)
+	})
+
+	// Races calendar (race events only, extended 1 year)
+	http.HandleFunc(baseRoute+"/races.ics", func(w http.ResponseWriter, r *http.Request) {
+		handleRacesCalendar(w, r, client, cfg)
+	})
+
+	// Health check
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	})
+
+	addr := ":" + cfg.Port
+	log.Printf("Listening on %s", addr)
+	log.Printf("Metrics:  http://<your-ip>:%s%s/metrics.ics", cfg.Port, baseRoute)
+	log.Printf("Workouts: http://<your-ip>:%s%s/workouts.ics", cfg.Port, baseRoute)
+	log.Printf("Races:    http://<your-ip>:%s%s/races.ics", cfg.Port, baseRoute)
+
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
 }
 
-func refresh(client *IntervalsClient, cache *CalendarCache, cfg Config) {
-	loc, err := time.LoadLocation(cfg.Timezone)
+func handleMetricsCalendar(w http.ResponseWriter, r *http.Request, client *IntervalsClient, cfg Config) {
+	loc, _ := time.LoadLocation(cfg.Timezone)
+	if loc == nil {
+		loc = time.UTC
+	}
+
+	now := time.Now().In(loc)
+	pastDate := now.AddDate(0, 0, -cfg.PastDays).Format("2006-01-02")
+	today := now.Format("2006-01-02")
+
+	wellness, err := client.FetchWellness(pastDate, today)
 	if err != nil {
-		log.Printf("WARNING: Could not load timezone %q, using UTC: %v", cfg.Timezone, err)
+		http.Error(w, fmt.Sprintf("Failed to fetch wellness data: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	ics := GenerateMetricsICS(wellness, cfg)
+
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	w.Header().Set("Content-Disposition", `inline; filename="metrics.ics"`)
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Write(ics)
+}
+
+func handleWorkoutsCalendar(w http.ResponseWriter, r *http.Request, client *IntervalsClient, cfg Config) {
+	loc, _ := time.LoadLocation(cfg.Timezone)
+	if loc == nil {
 		loc = time.UTC
 	}
 
@@ -94,113 +162,49 @@ func refresh(client *IntervalsClient, cache *CalendarCache, cfg Config) {
 	futureDate := now.AddDate(0, 0, cfg.FutureDays).Format("2006-01-02")
 	today := now.Format("2006-01-02")
 
-	log.Printf("Refreshing: activities %s to %s, events %s to %s",
-		pastDate, today, pastDate, futureDate)
-
+	// Fetch completed activities
 	activities, err := client.FetchActivities(pastDate, today)
 	if err != nil {
-		log.Printf("ERROR fetching activities: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to fetch activities: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Fetch events for past AND future — past events show the planned workout
-	// alongside the completed activity (what you were supposed to do vs what you did)
+	// Fetch planned workouts (non-race events)
 	events, err := client.FetchEvents(pastDate, futureDate)
 	if err != nil {
-		log.Printf("ERROR fetching events: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to fetch events: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	ics := GenerateICS(activities, events, cfg)
-	cache.Set(ics)
+	ics := GenerateWorkoutsICS(activities, events, cfg)
 
-	log.Printf("Refreshed: %d activities, %d events, %d bytes ICS",
-		len(activities), len(events), len(ics))
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	w.Header().Set("Content-Disposition", `inline; filename="workouts.ics"`)
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Write(ics)
 }
 
-// refreshInterval returns the appropriate refresh interval based on the current hour.
-func refreshInterval(cfg Config, tz *time.Location) time.Duration {
-	hour := time.Now().In(tz).Hour()
-	if hour >= cfg.ActiveStartHour && hour < cfg.ActiveEndHour {
-		return time.Duration(cfg.ActiveRefreshMinutes) * time.Minute
-	}
-	return time.Duration(cfg.QuietRefreshMinutes) * time.Minute
-}
-
-func startRefreshLoop(client *IntervalsClient, cache *CalendarCache, cfg Config) {
-	loc, err := time.LoadLocation(cfg.Timezone)
-	if err != nil {
+func handleRacesCalendar(w http.ResponseWriter, r *http.Request, client *IntervalsClient, cfg Config) {
+	loc, _ := time.LoadLocation(cfg.Timezone)
+	if loc == nil {
 		loc = time.UTC
 	}
 
-	go func() {
-		for {
-			interval := refreshInterval(cfg, loc)
-			log.Printf("Next refresh in %v", interval)
-			time.Sleep(interval)
-			refresh(client, cache, cfg)
-		}
-	}()
-}
+	now := time.Now().In(loc)
+	pastDate := now.AddDate(0, 0, -cfg.PastDays).Format("2006-01-02")
+	farFutureDate := now.AddDate(1, 0, 0).Format("2006-01-02")
 
-// getOutboundIP returns the preferred outbound IP of this machine.
-func getOutboundIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
+	// Fetch all events in extended range
+	events, err := client.FetchEvents(pastDate, farFutureDate)
 	if err != nil {
-		return ""
+		http.Error(w, fmt.Sprintf("Failed to fetch events: %v", err), http.StatusInternalServerError)
+		return
 	}
-	defer conn.Close()
-	addr := conn.LocalAddr().(*net.UDPAddr)
-	return addr.IP.String()
-}
 
-func main() {
-	cfg := loadConfig()
-	client := NewIntervalsClient(cfg.APIKey, cfg.AthleteID)
-	cache := &CalendarCache{}
+	ics := GenerateRacesICS(events, cfg)
 
-	// Initial fetch before serving
-	log.Println("Starting initial data fetch...")
-	refresh(client, cache, cfg)
-	log.Println("Initial fetch complete")
-
-	// Start background refresh loop
-	startRefreshLoop(client, cache, cfg)
-
-	// HTTP handlers
-	http.HandleFunc("/calendar.ics", func(w http.ResponseWriter, r *http.Request) {
-		data := cache.Get()
-		if len(data) == 0 {
-			http.Error(w, "Calendar data not yet available", http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
-		w.Header().Set("Content-Disposition", `inline; filename="intervals.ics"`)
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.Write(data)
-	})
-
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		data := cache.Get()
-		if len(data) == 0 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprint(w, "not ready")
-			return
-		}
-		fmt.Fprint(w, "ok")
-	})
-
-	addr := ":" + cfg.Port
-	log.Printf("Listening on %s", addr)
-	if ip := getOutboundIP(); ip != "" {
-		log.Printf("Subscribe to: http://%s:%s/calendar.ics", ip, cfg.Port)
-	} else {
-		log.Printf("Subscribe to: http://<your-ip>:%s/calendar.ics", cfg.Port)
-	}
-	log.Printf("Refresh schedule: %dm (active %d:00-%d:00) / %dm (quiet)",
-		cfg.ActiveRefreshMinutes, cfg.ActiveStartHour, cfg.ActiveEndHour, cfg.QuietRefreshMinutes)
-
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("Server error: %v", err)
-	}
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	w.Header().Set("Content-Disposition", `inline; filename="races.ics"`)
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Write(ics)
 }

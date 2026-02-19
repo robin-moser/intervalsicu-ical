@@ -27,7 +27,7 @@ func sportEmoji(actType string) string {
 	case strings.Contains(t, "row"):
 		return "\U0001F6A3" // 🚣
 	default:
-		return "\U0001F3C6" // 🏆
+		return "" // No emoji
 	}
 }
 
@@ -85,13 +85,11 @@ func formatDistance(meters float64) string {
 }
 
 // parseLocalTime parses an Intervals.icu local datetime string.
-// Intervals.icu returns formats like "2026-02-11T14:36:52" or "2026-02-11T00:00:00" or "2026-02-11".
 func parseLocalTime(s string) (time.Time, bool) {
 	if s == "" {
 		return time.Time{}, false
 	}
 
-	// Try full datetime first
 	for _, layout := range []string{
 		"2006-01-02T15:04:05",
 		"2006-01-02T15:04",
@@ -154,41 +152,123 @@ func activityEndTime(startTime time.Time, a Activity) time.Time {
 	return startTime.Add(1 * time.Hour)
 }
 
-// GenerateICS produces a complete ICS calendar from activities and events.
-// When an activity is paired with a planned event (via paired_event_id), they
-// are merged into a single calendar entry showing the activity timing/stats
-// with the planned workout description appended.
-func GenerateICS(activities []Activity, events []Event, cfg Config) []byte {
+// hasExcludedKeyword returns true if name contains any of the excluded keywords (case-insensitive).
+func hasExcludedKeyword(name string, keywords []string) bool {
+	if len(keywords) == 0 {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// GenerateMetricsICS generates a calendar with wellness/metrics data only.
+func GenerateMetricsICS(wellness []Wellness, cfg Config) []byte {
 	var b strings.Builder
 
 	b.WriteString("BEGIN:VCALENDAR\r\n")
 	b.WriteString("VERSION:2.0\r\n")
-	b.WriteString("PRODID:-//Intervals Calendar//EN\r\n")
+	b.WriteString("PRODID:-//Intervals Calendar - Metrics//EN\r\n")
 	b.WriteString("CALSCALE:GREGORIAN\r\n")
 	b.WriteString("METHOD:PUBLISH\r\n")
-	b.WriteString(foldLine("X-WR-CALNAME:Intervals.icu") + "\r\n")
+	b.WriteString(foldLine("X-WR-CALNAME:Intervals.icu - Metrics") + "\r\n")
 	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone) + "\r\n")
 
 	now := time.Now().UTC().Format("20060102T150405Z")
 
-	// Build lookup: eventID -> Activity for paired entries
-	pairedByEvent := make(map[int]Activity)
-	pairedActivityIDs := make(map[string]bool)
-	for _, a := range activities {
-		if a.PairedEventID != nil {
-			pairedByEvent[*a.PairedEventID] = a
-			pairedActivityIDs[a.ID] = true
+	var prevWeight float64
+	for i, w := range wellness {
+		wDate, err := time.Parse("2006-01-02", w.ID)
+		if err != nil {
+			continue
 		}
+
+		var parts []string
+
+		// Sleep duration and score together
+		if w.SleepSecs > 0 {
+			hours := int(w.SleepSecs) / 3600
+			mins := (int(w.SleepSecs) % 3600) / 60
+			sleepStr := ""
+			if hours > 0 && mins > 0 {
+				sleepStr = fmt.Sprintf("🛌%dh%dm", hours, mins)
+			} else if hours > 0 {
+				sleepStr = fmt.Sprintf("🛌%dh", hours)
+			} else {
+				sleepStr = fmt.Sprintf("🛌%dm", mins)
+			}
+
+			if w.SleepScore > 0 {
+				sleepStr = fmt.Sprintf("%s (%.0f)", sleepStr, w.SleepScore)
+			}
+			parts = append(parts, sleepStr)
+		} else if w.SleepScore > 0 {
+			parts = append(parts, fmt.Sprintf("😴(%.0f)", w.SleepScore))
+		}
+
+		if w.RestingHR > 0 {
+			parts = append(parts, fmt.Sprintf("❤️%.0f", w.RestingHR))
+		}
+		if w.HRV > 0 {
+			parts = append(parts, fmt.Sprintf("%.0f", w.HRV))
+		}
+
+		// Only show weight if it changed from previous day
+		if w.Weight > 0 && (i == 0 || w.Weight != prevWeight) {
+			parts = append(parts, fmt.Sprintf("⚖️%.1f", w.Weight))
+		}
+		if w.Weight > 0 {
+			prevWeight = w.Weight
+		}
+
+		if len(parts) == 0 {
+			continue
+		}
+
+		summary := strings.Join(parts, " ")
+
+		dateStr := wDate.Format("20060102")
+		nextDay := wDate.AddDate(0, 0, 1).Format("20060102")
+
+		b.WriteString("BEGIN:VEVENT\r\n")
+		b.WriteString(foldLine(fmt.Sprintf("UID:wellness-%s@intervals-calendar", w.ID)) + "\r\n")
+		b.WriteString(fmt.Sprintf("DTSTAMP:%s\r\n", now))
+		b.WriteString(fmt.Sprintf("DTSTART;VALUE=DATE:%s\r\n", dateStr))
+		b.WriteString(fmt.Sprintf("DTEND;VALUE=DATE:%s\r\n", nextDay))
+		b.WriteString("SEQUENCE:0\r\n")
+		b.WriteString(foldLine("SUMMARY:"+escapeICS(summary)) + "\r\n")
+		b.WriteString("END:VEVENT\r\n")
 	}
 
-	// Unpaired completed activities (no matching planned event)
+	b.WriteString("END:VCALENDAR\r\n")
+	return []byte(b.String())
+}
+
+// GenerateWorkoutsICS generates a calendar with completed activities + planned workouts (non-races).
+func GenerateWorkoutsICS(activities []Activity, events []Event, cfg Config) []byte {
+	var b strings.Builder
+
+	b.WriteString("BEGIN:VCALENDAR\r\n")
+	b.WriteString("VERSION:2.0\r\n")
+	b.WriteString("PRODID:-//Intervals Calendar - Workouts//EN\r\n")
+	b.WriteString("CALSCALE:GREGORIAN\r\n")
+	b.WriteString("METHOD:PUBLISH\r\n")
+	b.WriteString(foldLine("X-WR-CALNAME:Intervals.icu - Workouts") + "\r\n")
+	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone) + "\r\n")
+
+	now := time.Now().UTC().Format("20060102T150405Z")
+
 	for _, a := range activities {
-		if pairedActivityIDs[a.ID] {
-			continue // will be emitted as part of the merged event
+		// Skip bare activities with no useful data
+		if a.Name == "" && a.MovingTime <= 0 && a.Distance <= 0 {
+			continue
 		}
 
-		// Skip bare activities with no useful data (e.g. minimal Strava imports)
-		if a.Name == "" && a.MovingTime <= 0 && a.Distance <= 0 {
+		if hasExcludedKeyword(a.Name, cfg.ExcludedKeywords) {
 			continue
 		}
 
@@ -200,9 +280,12 @@ func GenerateICS(activities []Activity, events []Event, cfg Config) []byte {
 		endTime := activityEndTime(startTime, a)
 
 		emoji := sportEmoji(a.Type)
-		summary := fmt.Sprintf("%s %s", emoji, a.Name)
+		summary := a.Name
 		if a.Name == "" {
-			summary = fmt.Sprintf("%s %s", emoji, a.Type)
+			summary = a.Type
+		}
+		if emoji != "" {
+			summary = fmt.Sprintf("%s %s", emoji, summary)
 		}
 
 		desc := activityStats(a)
@@ -220,115 +303,175 @@ func GenerateICS(activities []Activity, events []Event, cfg Config) []byte {
 		b.WriteString("END:VEVENT\r\n")
 	}
 
-	// Events: merged (paired) or standalone (unpaired)
+	// Add planned workout events (excluding races)
 	for _, e := range events {
-		// Skip non-workout categories that don't make sense on a calendar
+		// Skip race events
+		if strings.HasPrefix(e.Category, "RACE") {
+			continue
+		}
+
+		// Skip non-workout categories
 		switch e.Category {
 		case "SET_EFTP", "FITNESS_DAYS", "SEASON_START", "SET_FITNESS", "TARGET":
 			continue
 		}
 
-		if a, paired := pairedByEvent[e.ID]; paired {
-			// --- Merged entry: activity + planned event ---
-			startTime, hasTime := parseLocalTime(a.StartDateLocal)
-			if !hasTime {
-				continue
-			}
-			endTime := activityEndTime(startTime, a)
+		if hasExcludedKeyword(e.Name, cfg.ExcludedKeywords) {
+			continue
+		}
 
-			emoji := sportEmoji(a.Type)
-			summary := fmt.Sprintf("%s %s", emoji, a.Name)
-			if a.Name == "" {
-				summary = fmt.Sprintf("%s %s", emoji, a.Type)
-			}
+		startTime, hasTime := parseLocalTime(e.StartDateLocal)
+		if startTime.IsZero() {
+			continue
+		}
 
-			// Activity stats first
-			var desc []string
-			desc = append(desc, "--- COMPLETED ---")
-			desc = append(desc, activityStats(a)...)
+		// Skip all-day events unless IncludeAllDayEvents is true
+		if !hasTime && !cfg.IncludeAllDayEvents {
+			continue
+		}
 
-			// Then the planned workout details
+		emoji := sportEmoji(e.Type)
+		summary := e.Name
+		if e.Name == "" {
+			summary = "Planned " + e.Type
+		}
+		if emoji != "" {
+			summary = fmt.Sprintf("%s %s", emoji, summary)
+		}
+
+		var desc []string
+		if e.Category != "" && e.Category != "WORKOUT" {
+			desc = append(desc, fmt.Sprintf("Category: %s", e.Category))
+		}
+		if e.Type != "" {
+			desc = append(desc, fmt.Sprintf("Type: %s", e.Type))
+		}
+		if e.MovingTime > 0 {
+			desc = append(desc, fmt.Sprintf("Planned Duration: %s", formatDuration(e.MovingTime)))
+		}
+		if e.Distance > 0 {
+			desc = append(desc, fmt.Sprintf("Planned Distance: %s", formatDistance(e.Distance)))
+		}
+		if e.Description != "" {
 			desc = append(desc, "")
-			desc = append(desc, "--- PLANNED ---")
-			if e.Name != "" {
-				desc = append(desc, fmt.Sprintf("Workout: %s", e.Name))
-			}
-			if e.MovingTime > 0 {
-				desc = append(desc, fmt.Sprintf("Planned Duration: %s", formatDuration(e.MovingTime)))
-			}
-			if e.Distance > 0 {
-				desc = append(desc, fmt.Sprintf("Planned Distance: %s", formatDistance(e.Distance)))
-			}
-			if e.Description != "" {
-				desc = append(desc, "")
-				desc = append(desc, e.Description)
-			}
+			desc = append(desc, e.Description)
+		}
 
-			b.WriteString("BEGIN:VEVENT\r\n")
-			b.WriteString(foldLine(fmt.Sprintf("UID:paired-%d-%s@intervals-calendar", e.ID, a.ID)) + "\r\n")
-			b.WriteString(fmt.Sprintf("DTSTAMP:%s\r\n", now))
+		b.WriteString("BEGIN:VEVENT\r\n")
+		b.WriteString(foldLine(fmt.Sprintf("UID:event-%d@intervals-calendar", e.ID)) + "\r\n")
+		b.WriteString(fmt.Sprintf("DTSTAMP:%s\r\n", now))
+		if hasTime {
+			duration := time.Duration(e.MovingTime) * time.Second
+			if duration <= 0 {
+				duration = 1 * time.Hour
+			}
+			endTime := startTime.Add(duration)
 			b.WriteString(fmt.Sprintf("DTSTART:%s\r\n", icsTimestamp(startTime)))
 			b.WriteString(fmt.Sprintf("DTEND:%s\r\n", icsTimestamp(endTime)))
-			b.WriteString("SEQUENCE:0\r\n")
-			b.WriteString(foldLine("SUMMARY:"+escapeICS(summary)) + "\r\n")
-			b.WriteString(foldLine("DESCRIPTION:"+escapeICS(strings.Join(desc, "\n"))) + "\r\n")
-			b.WriteString("END:VEVENT\r\n")
 		} else {
-			// --- Standalone planned event (future or unmatched) ---
-			startTime, hasTime := parseLocalTime(e.StartDateLocal)
-			if startTime.IsZero() {
-				continue
-			}
-
-			emoji := sportEmoji(e.Type)
-			summary := fmt.Sprintf("%s %s", emoji, e.Name)
-			if e.Name == "" {
-				summary = fmt.Sprintf("%s Planned %s", emoji, e.Type)
-			}
-
-			var desc []string
-			if e.Category != "" && e.Category != "WORKOUT" {
-				desc = append(desc, fmt.Sprintf("Category: %s", e.Category))
-			}
-			if e.Type != "" {
-				desc = append(desc, fmt.Sprintf("Type: %s", e.Type))
-			}
-			if e.MovingTime > 0 {
-				desc = append(desc, fmt.Sprintf("Planned Duration: %s", formatDuration(e.MovingTime)))
-			}
-			if e.Distance > 0 {
-				desc = append(desc, fmt.Sprintf("Planned Distance: %s", formatDistance(e.Distance)))
-			}
-			if e.Description != "" {
-				desc = append(desc, "")
-				desc = append(desc, e.Description)
-			}
-
-			b.WriteString("BEGIN:VEVENT\r\n")
-			b.WriteString(foldLine(fmt.Sprintf("UID:event-%d@intervals-calendar", e.ID)) + "\r\n")
-			b.WriteString(fmt.Sprintf("DTSTAMP:%s\r\n", now))
-			if hasTime {
-				duration := time.Duration(e.MovingTime) * time.Second
-				if duration <= 0 {
-					duration = 1 * time.Hour
-				}
-				endTime := startTime.Add(duration)
-				b.WriteString(fmt.Sprintf("DTSTART:%s\r\n", icsTimestamp(startTime)))
-				b.WriteString(fmt.Sprintf("DTEND:%s\r\n", icsTimestamp(endTime)))
-			} else {
-				// All-day event (no specific time on the plan)
-				dateStr := startTime.Format("20060102")
-				nextDay := startTime.AddDate(0, 0, 1).Format("20060102")
-				b.WriteString(fmt.Sprintf("DTSTART;VALUE=DATE:%s\r\n", dateStr))
-				b.WriteString(fmt.Sprintf("DTEND;VALUE=DATE:%s\r\n", nextDay))
-			}
-			b.WriteString("SEQUENCE:0\r\n")
-			b.WriteString(foldLine("SUMMARY:"+escapeICS(summary)) + "\r\n")
-			if len(desc) > 0 {
-				b.WriteString(foldLine("DESCRIPTION:"+escapeICS(strings.Join(desc, "\n"))) + "\r\n")
-			}
-			b.WriteString("END:VEVENT\r\n")
+			// All-day event
+			dateStr := startTime.Format("20060102")
+			nextDay := startTime.AddDate(0, 0, 1).Format("20060102")
+			b.WriteString(fmt.Sprintf("DTSTART;VALUE=DATE:%s\r\n", dateStr))
+			b.WriteString(fmt.Sprintf("DTEND;VALUE=DATE:%s\r\n", nextDay))
 		}
+		b.WriteString("SEQUENCE:0\r\n")
+		b.WriteString(foldLine("SUMMARY:"+escapeICS(summary)) + "\r\n")
+		if len(desc) > 0 {
+			b.WriteString(foldLine("DESCRIPTION:"+escapeICS(strings.Join(desc, "\n"))) + "\r\n")
+		}
+		b.WriteString("END:VEVENT\r\n")
+	}
+
+	b.WriteString("END:VCALENDAR\r\n")
+	return []byte(b.String())
+}
+
+// GenerateRacesICS generates a calendar with race events only.
+func GenerateRacesICS(events []Event, cfg Config) []byte {
+	var b strings.Builder
+
+	b.WriteString("BEGIN:VCALENDAR\r\n")
+	b.WriteString("VERSION:2.0\r\n")
+	b.WriteString("PRODID:-//Intervals Calendar - Races//EN\r\n")
+	b.WriteString("CALSCALE:GREGORIAN\r\n")
+	b.WriteString("METHOD:PUBLISH\r\n")
+	b.WriteString(foldLine("X-WR-CALNAME:Intervals.icu - Races") + "\r\n")
+	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone) + "\r\n")
+
+	now := time.Now().UTC().Format("20060102T150405Z")
+
+	for _, e := range events {
+		// Only include race events
+		if !strings.HasPrefix(e.Category, "RACE") {
+			continue
+		}
+
+		if hasExcludedKeyword(e.Name, cfg.ExcludedKeywords) {
+			continue
+		}
+
+		startTime, hasTime := parseLocalTime(e.StartDateLocal)
+		if startTime.IsZero() {
+			continue
+		}
+
+		// Skip all-day events unless IncludeAllDayEvents is true
+		if !hasTime && !cfg.IncludeAllDayEvents {
+			continue
+		}
+
+		emoji := sportEmoji(e.Type)
+		summary := e.Name
+		if e.Name == "" {
+			summary = "Planned " + e.Type
+		}
+		if emoji != "" {
+			summary = fmt.Sprintf("%s %s", emoji, summary)
+		}
+
+		var desc []string
+		if e.Category != "" && e.Category != "WORKOUT" {
+			desc = append(desc, fmt.Sprintf("Category: %s", e.Category))
+		}
+		if e.Type != "" {
+			desc = append(desc, fmt.Sprintf("Type: %s", e.Type))
+		}
+		if e.MovingTime > 0 {
+			desc = append(desc, fmt.Sprintf("Planned Duration: %s", formatDuration(e.MovingTime)))
+		}
+		if e.Distance > 0 {
+			desc = append(desc, fmt.Sprintf("Planned Distance: %s", formatDistance(e.Distance)))
+		}
+		if e.Description != "" {
+			desc = append(desc, "")
+			desc = append(desc, e.Description)
+		}
+
+		b.WriteString("BEGIN:VEVENT\r\n")
+		b.WriteString(foldLine(fmt.Sprintf("UID:event-%d@intervals-calendar", e.ID)) + "\r\n")
+		b.WriteString(fmt.Sprintf("DTSTAMP:%s\r\n", now))
+		if hasTime {
+			duration := time.Duration(e.MovingTime) * time.Second
+			if duration <= 0 {
+				duration = 1 * time.Hour
+			}
+			endTime := startTime.Add(duration)
+			b.WriteString(fmt.Sprintf("DTSTART:%s\r\n", icsTimestamp(startTime)))
+			b.WriteString(fmt.Sprintf("DTEND:%s\r\n", icsTimestamp(endTime)))
+		} else {
+			// All-day event
+			dateStr := startTime.Format("20060102")
+			nextDay := startTime.AddDate(0, 0, 1).Format("20060102")
+			b.WriteString(fmt.Sprintf("DTSTART;VALUE=DATE:%s\r\n", dateStr))
+			b.WriteString(fmt.Sprintf("DTEND;VALUE=DATE:%s\r\n", nextDay))
+		}
+		b.WriteString("SEQUENCE:0\r\n")
+		b.WriteString(foldLine("SUMMARY:"+escapeICS(summary)) + "\r\n")
+		if len(desc) > 0 {
+			b.WriteString(foldLine("DESCRIPTION:"+escapeICS(strings.Join(desc, "\n"))) + "\r\n")
+		}
+		b.WriteString("END:VEVENT\r\n")
 	}
 
 	b.WriteString("END:VCALENDAR\r\n")

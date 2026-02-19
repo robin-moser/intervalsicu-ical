@@ -45,6 +45,21 @@ type Event struct {
 	Color          string `json:"color"`
 }
 
+// Wellness represents daily fitness/fatigue metrics from Intervals.icu.
+type Wellness struct {
+	ID         string  `json:"id"`
+	CTL        float64 `json:"ctl"`
+	ATL        float64 `json:"atl"`
+	TSB        float64 `json:"tsb"`
+	RampRate   float64 `json:"rampRate"`
+	CTLRamp    float64 `json:"ctlRamp"`
+	Weight     float64 `json:"weight"`
+	RestingHR  float64 `json:"restingHR"`
+	HRV        float64 `json:"hrv"`
+	SleepScore float64 `json:"sleepScore"`
+	SleepSecs  float64 `json:"sleepSecs"`
+}
+
 // IntervalsClient fetches data from the Intervals.icu API.
 type IntervalsClient struct {
 	apiKey    string
@@ -113,4 +128,21 @@ func (c *IntervalsClient) FetchEvents(oldest, newest string) ([]Event, error) {
 		return nil, fmt.Errorf("parsing events: %w", err)
 	}
 	return events, nil
+}
+
+// FetchWellness returns daily wellness/fitness metrics within the date range.
+func (c *IntervalsClient) FetchWellness(oldest, newest string) ([]Wellness, error) {
+	url := fmt.Sprintf("%s/athlete/%s/wellness?oldest=%s&newest=%s",
+		baseURL, c.athleteID, oldest, newest)
+
+	data, err := c.doRequest(url)
+	if err != nil {
+		return nil, fmt.Errorf("fetching wellness: %w", err)
+	}
+
+	var wellness []Wellness
+	if err := json.Unmarshal(data, &wellness); err != nil {
+		return nil, fmt.Errorf("parsing wellness: %w", err)
+	}
+	return wellness, nil
 }
