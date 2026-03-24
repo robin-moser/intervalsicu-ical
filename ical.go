@@ -252,6 +252,15 @@ func GenerateMetricsICS(wellness []Wellness, cfg Config) []byte {
 func GenerateWorkoutsICS(activities []Activity, events []Event, cfg Config) []byte {
 	var b strings.Builder
 
+	// Build a set of event IDs that have a completed activity paired to them.
+	// These planned events should be suppressed in favour of the actual activity.
+	pairedEventIDs := make(map[int]bool)
+	for _, a := range activities {
+		if a.PairedEventID != nil {
+			pairedEventIDs[*a.PairedEventID] = true
+		}
+	}
+
 	b.WriteString("BEGIN:VCALENDAR\r\n")
 	b.WriteString("VERSION:2.0\r\n")
 	b.WriteString("PRODID:-//Intervals Calendar - Workouts//EN\r\n")
@@ -305,6 +314,11 @@ func GenerateWorkoutsICS(activities []Activity, events []Event, cfg Config) []by
 
 	// Add planned workout events (excluding races)
 	for _, e := range events {
+		// Skip events that have a completed activity paired to them
+		if pairedEventIDs[e.ID] {
+			continue
+		}
+
 		// Skip race events
 		if strings.HasPrefix(e.Category, "RACE") {
 			continue
