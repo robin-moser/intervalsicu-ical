@@ -1,6 +1,6 @@
 services:
   intervals-calendar:
-    build: .
+    image: ghcr.io/robin-moser/intervalsicu-ical:1
     container_name: intervals-calendar
     restart: unless-stopped
     ports:
