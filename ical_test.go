@@ -7,6 +7,62 @@ import (
 	"time"
 )
 
+func TestDistanceAndPace(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		seconds  int
+		meters   float64
+		distance string
+		pace     string
+	}{
+		{"whole minutes", 1500, 5000, "5.0km", "5:00 min/km"},
+		{"round seconds", 1553, 5000, "5.0km", "5:11 min/km"},
+		{"round up to minute", 1799, 5000, "5.0km", "6:00 min/km"},
+		{"fractional distance", 1500, 5123.4, "5.1km", "4:53 min/km"},
+		{"missing duration", 0, 5000, "5.0km", ""},
+		{"negative duration", -1, 5000, "5.0km", ""},
+		{"missing distance", 1500, 0, "", ""},
+		{"negative distance", 1500, -1, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Timezone: time.UTC}
+			activity := Activity{ID: "a1", Name: "Run", StartDate: "2026-07-15T09:00:00Z", MovingTime: tc.seconds, ElapsedTime: 7200, Distance: tc.meters}
+			event := Event{ID: 1, Name: "Run", StartDateLocal: "2026-07-15T09:00:00", MovingTime: tc.seconds, Distance: tc.meters, Category: "WORKOUT"}
+			race := event
+			race.Category = "RACE_A"
+			for _, calendar := range []struct {
+				name string
+				data []byte
+			}{
+				{"activities", GenerateWorkoutsICS([]Activity{activity}, nil, cfg)},
+				{"plans", GenerateWorkoutsICS(nil, []Event{event}, cfg)},
+				{"races", GenerateRacesICS([]Event{race}, cfg)},
+			} {
+				t.Run(calendar.name, func(t *testing.T) {
+					ics := strings.ReplaceAll(string(calendar.data), "\r\n ", "")
+					if strings.Contains(ics, " / ") {
+						t.Errorf("unexpected miles in calendar:\n%s", ics)
+					}
+					if tc.distance == "" {
+						if strings.Contains(ics, "Distance:") {
+							t.Errorf("unexpected distance in calendar:\n%s", ics)
+						}
+					} else if !strings.Contains(ics, "Distance: "+tc.distance) {
+						t.Errorf("missing distance %s in calendar:\n%s", tc.distance, ics)
+					}
+					if tc.pace == "" {
+						if strings.Contains(ics, "Pace:") {
+							t.Errorf("unexpected pace in calendar:\n%s", ics)
+						}
+					} else if !strings.Contains(ics, "Distance: "+tc.distance+"\\nPace: "+tc.pace) {
+						t.Errorf("missing pace directly below distance in calendar:\n%s", ics)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestActivityPrefersAbsoluteStart(t *testing.T) {
 	loc, err := time.LoadLocation("Europe/Berlin")
 	if err != nil {

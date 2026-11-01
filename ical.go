@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -77,11 +78,15 @@ func formatDuration(seconds int) string {
 	return fmt.Sprintf("%dm", m)
 }
 
-// formatDistance formats meters as km or miles with one decimal.
+// formatDistance formats meters as km with one decimal.
 func formatDistance(meters float64) string {
-	km := meters / 1000.0
-	mi := km * 0.621371
-	return fmt.Sprintf("%.1fkm / %.1fmi", km, mi)
+	return fmt.Sprintf("%.1fkm", meters/1000)
+}
+
+// formatPace formats positive moving time and distance as minutes per km.
+func formatPace(seconds int, meters float64) string {
+	secondsPerKM := int(math.Round(float64(seconds) * 1000 / meters))
+	return fmt.Sprintf("%d:%02d min/km", secondsPerKM/60, secondsPerKM%60)
 }
 
 // parseLocalTime parses an Intervals.icu local datetime string.
@@ -125,6 +130,9 @@ func activityStats(a Activity) []string {
 	}
 	if a.Distance > 0 {
 		stats = append(stats, fmt.Sprintf("Distance: %s", formatDistance(a.Distance)))
+		if a.MovingTime > 0 {
+			stats = append(stats, "Pace: "+formatPace(a.MovingTime, a.Distance))
+		}
 	}
 	if a.TotalElevationGain > 0 {
 		stats = append(stats, fmt.Sprintf("Elevation: %.0fm", a.TotalElevationGain))
@@ -375,6 +383,9 @@ func GenerateWorkoutsICS(activities []Activity, events []Event, cfg Config) []by
 		}
 		if e.Distance > 0 {
 			desc = append(desc, fmt.Sprintf("Planned Distance: %s", formatDistance(e.Distance)))
+			if e.MovingTime > 0 {
+				desc = append(desc, "Pace: "+formatPace(e.MovingTime, e.Distance))
+			}
 		}
 		if e.Description != "" {
 			desc = append(desc, "")
@@ -466,6 +477,9 @@ func GenerateRacesICS(events []Event, cfg Config) []byte {
 		}
 		if e.Distance > 0 {
 			desc = append(desc, fmt.Sprintf("Planned Distance: %s", formatDistance(e.Distance)))
+			if e.MovingTime > 0 {
+				desc = append(desc, "Pace: "+formatPace(e.MovingTime, e.Distance))
+			}
 		}
 		if e.Description != "" {
 			desc = append(desc, "")

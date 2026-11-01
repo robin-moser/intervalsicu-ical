@@ -18,7 +18,8 @@ A lightweight Docker container that generates an ICS calendar feed from your [In
 --- COMPLETED ---
 Type: Ride
 Duration: 2h51m
-Distance: 92.3km / 57.4mi
+Distance: 92.3km
+Pace: 1:51 min/km
 Elevation: 726m
 Avg Power: 277W (NP)
 Avg HR: 146bpm
