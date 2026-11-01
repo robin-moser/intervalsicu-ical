@@ -12,23 +12,29 @@ import (
 
 // Config holds all configuration from environment variables.
 type Config struct {
-	APIKey               string
-	AthleteID            string
-	Port                 string
-	Timezone             string
-	PastDays             int
-	FutureDays           int
-	ExcludedKeywords     []string
-	IncludeAllDayEvents  bool
-	IncludeFutureRaces   bool
+	APIKey              string
+	AthleteID           string
+	Port                string
+	Timezone            *time.Location
+	PastDays            int
+	FutureDays          int
+	ExcludedKeywords    []string
+	IncludeAllDayEvents bool
+	IncludeFutureRaces  bool
 }
 
 func loadConfig() Config {
+	zone := envOrDefault("TZ", "America/Denver")
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		log.Fatalf("Invalid TZ %q: %v", zone, err)
+	}
+
 	return Config{
 		APIKey:              mustEnv("INTERVALS_API_KEY"),
 		AthleteID:           mustEnv("INTERVALS_ATHLETE_ID"),
 		Port:                envOrDefault("PORT", "8491"),
-		Timezone:            envOrDefault("TZ", "America/Denver"),
+		Timezone:            loc,
 		PastDays:            envIntOrDefault("PAST_DAYS", 90),
 		FutureDays:          envIntOrDefault("FUTURE_DAYS", 60),
 		ExcludedKeywords:    envKeywords("EXCLUDED_KEYWORDS"),
@@ -128,12 +134,7 @@ func main() {
 }
 
 func handleMetricsCalendar(w http.ResponseWriter, r *http.Request, client *IntervalsClient, cfg Config) {
-	loc, _ := time.LoadLocation(cfg.Timezone)
-	if loc == nil {
-		loc = time.UTC
-	}
-
-	now := time.Now().In(loc)
+	now := time.Now().In(cfg.Timezone)
 	pastDate := now.AddDate(0, 0, -cfg.PastDays).Format("2006-01-02")
 	today := now.Format("2006-01-02")
 
@@ -152,12 +153,7 @@ func handleMetricsCalendar(w http.ResponseWriter, r *http.Request, client *Inter
 }
 
 func handleWorkoutsCalendar(w http.ResponseWriter, r *http.Request, client *IntervalsClient, cfg Config) {
-	loc, _ := time.LoadLocation(cfg.Timezone)
-	if loc == nil {
-		loc = time.UTC
-	}
-
-	now := time.Now().In(loc)
+	now := time.Now().In(cfg.Timezone)
 	pastDate := now.AddDate(0, 0, -cfg.PastDays).Format("2006-01-02")
 	futureDate := now.AddDate(0, 0, cfg.FutureDays).Format("2006-01-02")
 	today := now.Format("2006-01-02")
@@ -185,12 +181,7 @@ func handleWorkoutsCalendar(w http.ResponseWriter, r *http.Request, client *Inte
 }
 
 func handleRacesCalendar(w http.ResponseWriter, r *http.Request, client *IntervalsClient, cfg Config) {
-	loc, _ := time.LoadLocation(cfg.Timezone)
-	if loc == nil {
-		loc = time.UTC
-	}
-
-	now := time.Now().In(loc)
+	now := time.Now().In(cfg.Timezone)
 	pastDate := now.AddDate(0, 0, -cfg.PastDays).Format("2006-01-02")
 	farFutureDate := now.AddDate(1, 0, 0).Format("2006-01-02")
 

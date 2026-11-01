@@ -13,6 +13,7 @@ const baseURL = "https://intervals.icu/api/v1"
 // Activity represents a completed workout from Intervals.icu.
 type Activity struct {
 	ID                 string  `json:"id"`
+	StartDate          string  `json:"start_date"`
 	StartDateLocal     string  `json:"start_date_local"`
 	Type               string  `json:"type"`
 	Name               string  `json:"name"`
@@ -32,17 +33,17 @@ type Activity struct {
 
 // Event represents a planned workout/event from Intervals.icu.
 type Event struct {
-	ID             int    `json:"id"`
-	StartDateLocal string `json:"start_date_local"`
-	EndDateLocal   string `json:"end_date_local"`
-	Type           string `json:"type"`
-	Name           string `json:"name"`
-	Description    string `json:"description"`
-	Category       string `json:"category"`
-	MovingTime     int    `json:"moving_time"`
+	ID             int     `json:"id"`
+	StartDateLocal string  `json:"start_date_local"`
+	EndDateLocal   string  `json:"end_date_local"`
+	Type           string  `json:"type"`
+	Name           string  `json:"name"`
+	Description    string  `json:"description"`
+	Category       string  `json:"category"`
+	MovingTime     int     `json:"moving_time"`
 	Distance       float64 `json:"distance"`
-	Indoor         bool   `json:"indoor"`
-	Color          string `json:"color"`
+	Indoor         bool    `json:"indoor"`
+	Color          string  `json:"color"`
 }
 
 // Wellness represents daily fitness/fatigue metrics from Intervals.icu.

@@ -79,13 +79,15 @@ All configuration is via environment variables (set in `.env` or `docker-compose
 | `INTERVALS_API_KEY` | *required* | Your Intervals.icu API key |
 | `INTERVALS_ATHLETE_ID` | *required* | Your athlete ID (e.g. `i12345`) |
 | `PORT` | `8491` | HTTP port for the calendar feed |
-| `TZ` | `America/Denver` | Timezone for date calculations |
+| `TZ` | `America/Denver` | IANA timezone for planned/local start times and date ranges; invalid names stop startup |
 | `PAST_DAYS` | `90` | How many days back to fetch activities |
 | `FUTURE_DAYS` | `60` | How many days ahead to fetch planned events |
 | `ACTIVE_REFRESH_MINUTES` | `10` | Refresh interval during active hours |
 | `QUIET_REFRESH_MINUTES` | `30` | Refresh interval during quiet hours |
 | `ACTIVE_START_HOUR` | `6` | Start of active refresh window (24h) |
 | `ACTIVE_END_HOUR` | `22` | End of active refresh window (24h) |
+
+Set `TZ` to match your Intervals.icu local event times (for example, `Europe/Berlin`). Completed activities use `start_date` when available, including activities recorded while travelling; otherwise they fall back to local time in `TZ`. Offset-free planned times in the repeated hour when daylight saving ends cannot identify which occurrence was intended; they use Go's timezone rules.
 
 ## How pairing works
 

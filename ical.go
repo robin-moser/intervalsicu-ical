@@ -85,9 +85,16 @@ func formatDistance(meters float64) string {
 }
 
 // parseLocalTime parses an Intervals.icu local datetime string.
-func parseLocalTime(s string) (time.Time, bool) {
+// shortcut: offset-free times cannot identify repeated DST hours; prefer API UTC times where available.
+func parseLocalTime(s string, loc *time.Location) (time.Time, bool) {
 	if s == "" {
 		return time.Time{}, false
+	}
+
+	hasTime := strings.Contains(s, "T") && !strings.HasSuffix(s, "T00:00:00")
+	if !hasTime {
+		// All-day dates must not shift when DST skips local midnight.
+		loc = time.UTC
 	}
 
 	for _, layout := range []string{
@@ -95,17 +102,16 @@ func parseLocalTime(s string) (time.Time, bool) {
 		"2006-01-02T15:04",
 		"2006-01-02",
 	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			hasTime := strings.Contains(s, "T") && !strings.HasSuffix(s, "T00:00:00")
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
 			return t, hasTime
 		}
 	}
 	return time.Time{}, false
 }
 
-// icsTimestamp formats a time as ICS DTSTART/DTEND with timezone.
+// icsTimestamp formats a time as an unambiguous UTC ICS timestamp.
 func icsTimestamp(t time.Time) string {
-	return t.Format("20060102T150405")
+	return t.UTC().Format("20060102T150405Z")
 }
 
 // activityStats builds the stats lines for a completed activity.
@@ -176,7 +182,7 @@ func GenerateMetricsICS(wellness []Wellness, cfg Config) []byte {
 	b.WriteString("CALSCALE:GREGORIAN\r\n")
 	b.WriteString("METHOD:PUBLISH\r\n")
 	b.WriteString(foldLine("X-WR-CALNAME:Intervals.icu - Metrics") + "\r\n")
-	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone) + "\r\n")
+	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone.String()) + "\r\n")
 
 	now := time.Now().UTC().Format("20060102T150405Z")
 
@@ -267,7 +273,7 @@ func GenerateWorkoutsICS(activities []Activity, events []Event, cfg Config) []by
 	b.WriteString("CALSCALE:GREGORIAN\r\n")
 	b.WriteString("METHOD:PUBLISH\r\n")
 	b.WriteString(foldLine("X-WR-CALNAME:Intervals.icu - Workouts") + "\r\n")
-	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone) + "\r\n")
+	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone.String()) + "\r\n")
 
 	now := time.Now().UTC().Format("20060102T150405Z")
 
@@ -281,9 +287,13 @@ func GenerateWorkoutsICS(activities []Activity, events []Event, cfg Config) []by
 			continue
 		}
 
-		startTime, hasTime := parseLocalTime(a.StartDateLocal)
-		if !hasTime {
-			continue
+		startTime, err := time.Parse(time.RFC3339, a.StartDate)
+		if err != nil {
+			var hasTime bool
+			startTime, hasTime = parseLocalTime(a.StartDateLocal, cfg.Timezone)
+			if !hasTime {
+				continue
+			}
 		}
 
 		endTime := activityEndTime(startTime, a)
@@ -334,7 +344,7 @@ func GenerateWorkoutsICS(activities []Activity, events []Event, cfg Config) []by
 			continue
 		}
 
-		startTime, hasTime := parseLocalTime(e.StartDateLocal)
+		startTime, hasTime := parseLocalTime(e.StartDateLocal, cfg.Timezone)
 		if startTime.IsZero() {
 			continue
 		}
@@ -411,7 +421,7 @@ func GenerateRacesICS(events []Event, cfg Config) []byte {
 	b.WriteString("CALSCALE:GREGORIAN\r\n")
 	b.WriteString("METHOD:PUBLISH\r\n")
 	b.WriteString(foldLine("X-WR-CALNAME:Intervals.icu - Races") + "\r\n")
-	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone) + "\r\n")
+	b.WriteString(foldLine("X-WR-TIMEZONE:"+cfg.Timezone.String()) + "\r\n")
 
 	now := time.Now().UTC().Format("20060102T150405Z")
 
@@ -425,7 +435,7 @@ func GenerateRacesICS(events []Event, cfg Config) []byte {
 			continue
 		}
 
-		startTime, hasTime := parseLocalTime(e.StartDateLocal)
+		startTime, hasTime := parseLocalTime(e.StartDateLocal, cfg.Timezone)
 		if startTime.IsZero() {
 			continue
 		}
